@@ -22,6 +22,51 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Create app icon files
+        run: |
+          python3 << 'PYEOF'
+          import struct, zlib, os
+
+          def make_png(size, path):
+              os.makedirs(os.path.dirname(path), exist_ok=True)
+              w = h = size
+              gr, gg, gb = 10, 92, 54
+              wr, wg, wb = 255, 255, 255
+              rows = []
+              for y in range(h):
+                  row = [0]
+                  for x in range(w):
+                      r, g, b = gr, gg, gb
+                      m = w // 5
+                      cx = w // 2
+                      if m <= x <= w-m and int(m*1.2) <= y <= int(h-m*0.8):
+                          r, g, b = wr, wg, wb
+                      dw = w // 6
+                      dh = h // 4
+                      dx = cx - dw//2
+                      dy = int(h - m*0.8 - dh)
+                      if dx <= x <= dx+dw and dy <= y <= int(h-m*0.8):
+                          r, g, b = gr, gg, gb
+                      if abs(x-cx) <= w//10 and int(m*0.3) <= y <= int(m*1.2):
+                          r, g, b = wr, wg, wb
+                      row += [r, g, b]
+                  rows.append(bytes(row))
+              sig = b'\x89PNG\r\n\x1a\n'
+              def chunk(n, d):
+                  c = n+d
+                  return struct.pack('>I',len(d))+c+struct.pack('>I',zlib.crc32(c)&0xffffffff)
+              ihdr = chunk(b'IHDR', struct.pack('>IIBBBBB',w,h,8,2,0,0,0))
+              idat = chunk(b'IDAT', zlib.compress(b''.join(rows),9))
+              iend = chunk(b'IEND', b'')
+              open(path,'wb').write(sig+ihdr+idat+iend)
+
+          base = 'app/src/main/res'
+          for folder, size in [('mipmap-mdpi',48),('mipmap-hdpi',72),('mipmap-xhdpi',96),('mipmap-xxhdpi',144),('mipmap-xxxhdpi',192)]:
+              make_png(size, f'{base}/{folder}/ic_launcher.png')
+              make_png(size, f'{base}/{folder}/ic_launcher_round.png')
+              print(f'Created {folder}')
+          PYEOF
+
       - name: Install Gradle wrapper
         run: |
           gradle wrapper --gradle-version=8.4 --distribution-type=bin
