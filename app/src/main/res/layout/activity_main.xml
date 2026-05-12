@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.coordinatorlayout.widget.CoordinatorLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#f3f7f5">
+
+    <!-- ── Loading progress bar at top ── -->
+    <ProgressBar
+        android:id="@+id/progressBar"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="4dp"
+        android:progressTint="#0a5c36"
+        android:progressBackgroundTint="#d1ead9"
+        android:max="100"
+        android:visibility="gone"/>
+
+    <!-- ── The actual WebView — loads your website ── -->
+    <WebView
+        android:id="@+id/webView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_marginTop="4dp"
+        android:visibility="gone"/>
+
+    <!-- ── Offline screen ── -->
+    <LinearLayout
+        android:id="@+id/layoutOffline"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:padding="32dp"
+        android:visibility="gone">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="ইন্টারনেট সংযোগ নেই"
+            android:textSize="20sp"
+            android:textStyle="bold"
+            android:textColor="#0f2318"
+            android:layout_marginBottom="12dp"/>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="WiFi বা মোবাইল ডেটা চালু করুন এবং আবার চেষ্টা করুন।"
+            android:textColor="#6b8f7a"
+            android:gravity="center"
+            android:layout_marginBottom="28dp"/>
+
+        <Button
+            android:id="@+id/btnRetry"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="আবার চেষ্টা করুন"
+            android:backgroundTint="#0a5c36"/>
+
+    </LinearLayout>
+
+    <!-- ── Permission explanation screen ── -->
+    <LinearLayout
+        android:id="@+id/layoutPermission"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:padding="32dp"
+        android:visibility="gone">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="🕋"
+            android:textSize="48sp"
+            android:layout_marginBottom="16dp"/>
+
+        <TextView
+            android:id="@+id/tvPermMsg"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="লোকেশন অনুমতি প্রয়োজন"
+            android:textColor="#0f2318"
+            android:gravity="center"
+            android:lineSpacingMultiplier="1.4"
+            android:layout_marginBottom="28dp"/>
+
+        <Button
+            android:id="@+id/btnGrantPerm"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="অনুমতি দিন"
+            android:backgroundTint="#0a5c36"
+            android:layout_marginBottom="12dp"/>
+
+        <Button
+            android:id="@+id/btnOpenSettings"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="সেটিংসে যান"
+            android:backgroundTint="#157347"
+            android:visibility="gone"/>
+
+    </LinearLayout>
+
+</androidx.coordinatorlayout.widget.CoordinatorLayout>
