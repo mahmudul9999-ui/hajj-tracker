@@ -1,18 +1,12 @@
 package com.poriborton.hajjtracker;
 
 import android.Manifest;
-import android.app.Notification;
-import android.app.NotificationChannel;
-import android.app.NotificationManager;
-import android.app.PendingIntent;
-import android.app.Service;
-import android.content.Intent;
+import android.app.*;
+import android.content.*;
 import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
 import android.location.Location;
-import android.os.Build;
-import android.os.IBinder;
-import android.os.Looper;
+import android.os.*;
 import android.util.Log;
 
 import androidx.annotation.NonNull;
@@ -20,12 +14,7 @@ import androidx.annotation.Nullable;
 import androidx.core.app.ActivityCompat;
 import androidx.core.app.NotificationCompat;
 
-import com.google.android.gms.location.FusedLocationProviderClient;
-import com.google.android.gms.location.LocationCallback;
-import com.google.android.gms.location.LocationRequest;
-import com.google.android.gms.location.LocationResult;
-import com.google.android.gms.location.LocationServices;
-import com.google.android.gms.location.Priority;
+import com.google.android.gms.location.*;
 
 import org.json.JSONObject;
 
@@ -37,138 +26,184 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * LocationForegroundService
+ * LocationForegroundService — Background GPS
  *
- * A Foreground Service that uses Google's Fused Location Provider to get GPS
- * coordinates every 15 seconds and sends them to your website's Firebase
- * database via the Firebase REST API — no Firebase SDK needed here.
+ * FIX 3: Three layers keep this alive even when app is closed:
  *
- * Why a Foreground Service?
- *   Android normally kills background processes to save battery.
- *   A Foreground Service is exempt from this — it shows a persistent notification
- *   ("Hajj Tracker — ট্র্যাকিং চালু") which tells the user tracking is active.
- *   It runs even when:
- *     - The user presses Home button
- *     - The screen locks
- *     - The phone is in a bag
- *     - The app is swiped from recents
+ *   Layer 1 — Foreground Service + WakeLock
+ *     Android cannot kill a foreground service that holds a WakeLock.
+ *     The persistent notification is required by Android law.
  *
- * The service only stops when:
- *     - The user taps "ট্র্যাকিং বন্ধ করুন" in the notification
- *     - The user logs out via the website (JS calls Android.stopTracking())
- *     - ACTION_STOP intent is sent
+ *   Layer 2 — START_STICKY
+ *     If Android kills this service due to extreme memory pressure,
+ *     START_STICKY tells Android to restart it automatically.
  *
- * After a phone reboot, BootReceiver restarts this service automatically.
+ *   Layer 3 — AlarmManager restart
+ *     Every 4 minutes, AlarmManager fires an alarm that checks if
+ *     the service is running and restarts it if not.
+ *     This defeats Samsung/Xiaomi/Huawei battery killers.
+ *
+ *   Layer 4 — BootReceiver
+ *     Restarts tracking after phone reboot.
+ *
+ * GPS pushes to Firebase every 10 seconds via REST API.
+ * online:true always — only explicit logout sets false.
  */
 public class LocationForegroundService extends Service {
 
-    private static final String TAG         = "HajjLocationSvc";
-    public  static final String CHANNEL_ID  = "hajj_location_channel";
+    private static final String TAG         = "HajjLocSvc";
+    public  static final String CHANNEL_ID  = "hajj_loc_ch";
     public  static final int    NOTIF_ID    = 2001;
-    public  static final String ACTION_START = "ACTION_START";
-    public  static final String ACTION_STOP  = "ACTION_STOP";
+    public  static final String ACTION_START = "START";
+    public  static final String ACTION_STOP  = "STOP";
+    // AlarmManager restart action
+    public  static final String ACTION_RESTART = "RESTART_CHECK";
 
-    // ── GPS update frequency ──────────────────────────────────────
-    // 15 seconds between updates — good balance of accuracy vs battery
-    // Reduce to 10000 for more frequent updates, increase to 30000 to save battery
-    private static final long UPDATE_INTERVAL_MS  = 15_000;
-    private static final long FASTEST_INTERVAL_MS = 10_000;
-    // ─────────────────────────────────────────────────────────────
+    // GPS every 10 seconds
+    private static final long INTERVAL_MS       = 10_000L;
+    private static final long FASTEST_INTERVAL  =  5_000L;
+    // Heartbeat keeps lastSeen fresh even if GPS stalls
+    private static final long HEARTBEAT_MS      = 20_000L;
+    // AlarmManager checks service every 4 minutes
+    private static final long ALARM_INTERVAL_MS = 4 * 60 * 1000L;
 
-    // ── Firebase REST API ─────────────────────────────────────────
-    // We write directly to Firebase Realtime Database via its REST API.
-    // This avoids including the Firebase SDK in the app — simpler and smaller.
-    // Format: https://<project-id>.firebaseio.com/locations/<uid>.json?auth=<token>
-    private static final String FIREBASE_DB_URL =
+    private static final String FIREBASE_URL =
         "https://pilgrim-tracker-ee93d-default-rtdb.asia-southeast1.firebasedatabase.app";
-    // ─────────────────────────────────────────────────────────────
 
     private FusedLocationProviderClient fusedClient;
-    private LocationCallback locationCallback;
-    private ExecutorService networkExecutor;
+    private LocationCallback            locationCallback;
+    private ExecutorService             networkThread;
+    private PowerManager.WakeLock       wakeLock;
+    private Handler                     handler;
+    private Runnable                    heartbeatTask;
+    private AlarmManager                alarmManager;
 
-    // User info passed from MainActivity / BootReceiver
-    private String uid;
-    private String userName;
-    private String userRole;
-    private String groupId;
-    private String firebaseToken;  // Firebase Auth ID token for REST API auth
+    private String uid, userName, userRole, groupId, firebaseToken;
 
-    // Last known location — accessible via getLastLocationJson()
-    private static volatile double lastLat = 0;
-    private static volatile double lastLng = 0;
-    private static volatile double lastAcc = 0;
+    public  static volatile boolean isRunning = false;
+    private static volatile double  lastLat   = 0;
+    private static volatile double  lastLng   = 0;
+    private static volatile double  lastAcc   = 0;
 
+    // ════════════════════════════════════════════════════════════
     @Override
     public void onCreate() {
         super.onCreate();
-        networkExecutor = Executors.newSingleThreadExecutor();
-        fusedClient     = LocationServices.getFusedLocationProviderClient(this);
+        networkThread = Executors.newSingleThreadExecutor();
+        handler       = new Handler(Looper.getMainLooper());
+        fusedClient   = LocationServices.getFusedLocationProviderClient(this);
+        alarmManager  = (AlarmManager) getSystemService(ALARM_SERVICE);
         createNotificationChannel();
+
+        // PARTIAL_WAKE_LOCK: keeps CPU alive, screen can sleep
+        PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+        wakeLock = pm.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK, "HajjTracker:GPSLock");
+        wakeLock.setReferenceCounted(false);
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent == null) return START_STICKY;
+        String action = intent != null ? intent.getAction() : null;
 
-        String action = intent.getAction();
+        // Handle restart alarm check
+        if (ACTION_RESTART.equals(action)) {
+            if (isRunning) return START_STICKY;
+            // Service was killed — restore from SharedPrefs and restart
+            action = ACTION_START;
+        }
+
         if (ACTION_STOP.equals(action)) {
-            stopForeground(true);
+            shutdown();
+            return START_NOT_STICKY;
+        }
+
+        // Read user info from intent
+        if (intent != null) {
+            String u = intent.getStringExtra("uid");
+            if (u != null && !u.isEmpty()) {
+                uid           = u;
+                userName      = intent.getStringExtra("name");
+                userRole      = intent.getStringExtra("role");
+                groupId       = intent.getStringExtra("groupId");
+                firebaseToken = intent.getStringExtra("token");
+            }
+        }
+
+        // Fallback: restore from SharedPreferences
+        if (uid == null || uid.isEmpty()) {
+            SharedPreferences p = getSharedPreferences(BootReceiver.PREFS, MODE_PRIVATE);
+            uid           = p.getString("uid",      null);
+            userName      = p.getString("name",     "Unknown");
+            userRole      = p.getString("role",     "pilgrim");
+            groupId       = p.getString("groupId",  "");
+            firebaseToken = p.getString("token",    "");
+        }
+
+        if (uid == null || uid.isEmpty()) {
+            Log.w(TAG, "No UID — stopping");
             stopSelf();
             return START_NOT_STICKY;
         }
 
-        if (ACTION_START.equals(action)) {
-            uid          = intent.getStringExtra("uid");
-            userName     = intent.getStringExtra("name");
-            userRole     = intent.getStringExtra("role");
-            groupId      = intent.getStringExtra("groupId");
-            firebaseToken= intent.getStringExtra("token");  // optional
-
-            if (uid == null || uid.isEmpty()) {
-                // No UID yet — service will still collect GPS but not push to Firebase
-                // until UID is provided via a subsequent START intent
-                uid = "anonymous_" + System.currentTimeMillis();
-            }
-
-            // Start as foreground immediately — Android requires this within 5 seconds
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                startForeground(NOTIF_ID, buildNotification("GPS চালু হচ্ছে…"),
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION);
-            } else {
-                startForeground(NOTIF_ID, buildNotification("GPS চালু হচ্ছে…"));
-            }
-
-            startLocationUpdates();
+        // MUST call startForeground within 5 seconds of onStartCommand
+        Notification n = buildNotification("লাইভ ট্র্যাকিং শুরু হচ্ছে…");
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION);
+        } else {
+            startForeground(NOTIF_ID, n);
         }
 
-        // START_STICKY: if Android kills this service due to memory pressure,
-        // it will be restarted automatically with the last intent
+        if (!wakeLock.isHeld()) wakeLock.acquire();
+        isRunning = true;
+
+        startLocationUpdates();
+        startHeartbeat();
+        scheduleAlarmRestart();  // FIX 3: AlarmManager watchdog
+
+        Log.d(TAG, "Service started for uid=" + uid);
         return START_STICKY;
     }
 
     @Nullable @Override
-    public IBinder onBind(Intent intent) { return null; }
+    public IBinder onBind(Intent i) { return null; }
 
     @Override
     public void onDestroy() {
         super.onDestroy();
+        isRunning = false;
+        stopHeartbeat();
         stopLocationUpdates();
-        if (networkExecutor != null) networkExecutor.shutdown();
-        // Mark user as offline in Firebase when service is explicitly stopped
-        if (uid != null && !uid.startsWith("anonymous_")) {
-            pushOffline();
-        }
+        if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+        if (networkThread != null) networkThread.shutdown();
+        // Note: do NOT set online=false here.
+        // Android may be restarting us via START_STICKY.
+        // Only shutdown() (called by logout) sets offline.
+        Log.d(TAG, "onDestroy called — Android may restart via START_STICKY");
     }
 
-    // ═══════════════════════════════════════════════════════════════
+    // Called only on explicit logout
+    private void shutdown() {
+        Log.d(TAG, "shutdown() — explicit logout");
+        if (uid != null && !uid.isEmpty()) {
+            pushField("online.json", "false");
+        }
+        cancelAlarmRestart();
+        stopForeground(true);
+        isRunning = false;
+        stopHeartbeat();
+        stopLocationUpdates();
+        if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+        if (networkThread != null) networkThread.shutdown();
+        stopSelf();
+    }
+
+    // ════════════════════════════════════════════════════════════
     // GPS — Fused Location Provider
-    // This handles GPS, WiFi-based, and cell-tower location automatically,
-    // choosing the most accurate source available and managing battery usage.
-    // ═══════════════════════════════════════════════════════════════
+    // ════════════════════════════════════════════════════════════
     private void startLocationUpdates() {
-        LocationRequest request = new LocationRequest.Builder(UPDATE_INTERVAL_MS)
-                .setMinUpdateIntervalMillis(FASTEST_INTERVAL_MS)
+        LocationRequest req = new LocationRequest.Builder(INTERVAL_MS)
+                .setMinUpdateIntervalMillis(FASTEST_INTERVAL)
                 .setPriority(Priority.PRIORITY_HIGH_ACCURACY)
                 .setWaitForAccurateLocation(false)
                 .build();
@@ -178,184 +213,189 @@ public class LocationForegroundService extends Service {
             public void onLocationResult(@NonNull LocationResult result) {
                 Location loc = result.getLastLocation();
                 if (loc == null) return;
-
                 lastLat = loc.getLatitude();
                 lastLng = loc.getLongitude();
                 lastAcc = loc.getAccuracy();
-
-                Log.d(TAG, "Location: " + lastLat + ", " + lastLng + " ±" + lastAcc + "m");
-
                 updateNotification(loc);
-                pushToFirebase(loc);
+                pushLocation(loc.getLatitude(), loc.getLongitude(), loc.getAccuracy());
             }
         };
 
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+        if (ActivityCompat.checkSelfPermission(this,
+                Manifest.permission.ACCESS_FINE_LOCATION)
                 == PackageManager.PERMISSION_GRANTED) {
-            fusedClient.requestLocationUpdates(request, locationCallback, Looper.getMainLooper());
-            Log.d(TAG, "Location updates started for uid=" + uid);
+            fusedClient.requestLocationUpdates(req, locationCallback,
+                    Looper.getMainLooper());
+            Log.d(TAG, "GPS updates started");
         } else {
-            Log.e(TAG, "Location permission not granted — stopping service");
+            Log.e(TAG, "No location permission — stopping");
             stopSelf();
         }
     }
 
     private void stopLocationUpdates() {
-        if (fusedClient != null && locationCallback != null) {
+        if (fusedClient != null && locationCallback != null)
             fusedClient.removeLocationUpdates(locationCallback);
+    }
+
+    // ════════════════════════════════════════════════════════════
+    // HEARTBEAT — keeps lastSeen fresh even if GPS stalls
+    // ════════════════════════════════════════════════════════════
+    private void startHeartbeat() {
+        heartbeatTask = new Runnable() {
+            @Override public void run() {
+                if (lastLat != 0 && lastLng != 0)
+                    pushLocation(lastLat, lastLng, lastAcc);
+                handler.postDelayed(this, HEARTBEAT_MS);
+            }
+        };
+        handler.postDelayed(heartbeatTask, HEARTBEAT_MS);
+    }
+
+    private void stopHeartbeat() {
+        if (handler != null && heartbeatTask != null)
+            handler.removeCallbacks(heartbeatTask);
+    }
+
+    // ════════════════════════════════════════════════════════════
+    // FIX 3: AlarmManager restart watchdog
+    // Fires every 4 minutes and restarts the service if it was killed
+    // This defeats Samsung DeX, MIUI, EMUI battery killers
+    // ════════════════════════════════════════════════════════════
+    private void scheduleAlarmRestart() {
+        Intent i = new Intent(this, LocationForegroundService.class);
+        i.setAction(ACTION_RESTART);
+        PendingIntent pi = PendingIntent.getService(this, 99, i,
+                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+
+        long triggerAt = System.currentTimeMillis() + ALARM_INTERVAL_MS;
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            // setExactAndAllowWhileIdle fires even in Doze mode
+            alarmManager.setExactAndAllowWhileIdle(
+                    AlarmManager.RTC_WAKEUP, triggerAt, pi);
+        } else {
+            alarmManager.setExact(AlarmManager.RTC_WAKEUP, triggerAt, pi);
         }
+        Log.d(TAG, "Alarm restart scheduled in 4min");
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    // FIREBASE REST API — write location
-    //
-    // We use Firebase Realtime Database's REST API (simple HTTP PUT).
-    // This is the same database your web tracker uses — data is shared.
-    //
-    // The database rules must allow write for authenticated users.
-    // If you are using Firebase Auth on the website, the user's ID token
-    // can be passed via the 'token' extra when starting this service.
-    // ═══════════════════════════════════════════════════════════════
-    private void pushToFirebase(Location loc) {
-        if (uid == null) return;
+    private void cancelAlarmRestart() {
+        Intent i = new Intent(this, LocationForegroundService.class);
+        i.setAction(ACTION_RESTART);
+        PendingIntent pi = PendingIntent.getService(this, 99, i,
+                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_NO_CREATE);
+        if (pi != null) alarmManager.cancel(pi);
+    }
 
-        networkExecutor.execute(() -> {
+    // ════════════════════════════════════════════════════════════
+    // FIREBASE REST API
+    // Writes to /locations/{uid} — same path the web tracker reads
+    // Works without Firebase SDK — plain HTTP PUT
+    // FIX 2: Token is passed from website JS after login so Firebase
+    //        security rules accept the write
+    // ════════════════════════════════════════════════════════════
+    private void pushLocation(double lat, double lng, double acc) {
+        if (uid == null || uid.isEmpty()) return;
+        networkThread.execute(() -> {
             try {
-                // Build the JSON payload matching exactly what your web tracker writes
-                JSONObject data = new JSONObject();
-                data.put("uid",      uid);
-                data.put("name",     userName != null ? userName : "Unknown");
-                data.put("groupId",  groupId  != null ? groupId  : "");
-                data.put("role",     userRole  != null ? userRole  : "pilgrim");
-                data.put("lat",      loc.getLatitude());
-                data.put("lng",      loc.getLongitude());
-                data.put("acc",      loc.getAccuracy());
-                data.put("lastSeen", System.currentTimeMillis());
-                data.put("online",   true);  // stays true until explicit logout
-                data.put("sos",      false);
-
-                // Firebase REST API endpoint for this user's location
-                String urlStr = FIREBASE_DB_URL + "/locations/" + uid + ".json";
-
-                // Append auth token if available
-                if (firebaseToken != null && !firebaseToken.isEmpty()) {
-                    urlStr += "?auth=" + firebaseToken;
-                }
-
-                URL url = new URL(urlStr);
-                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                conn.setRequestMethod("PUT");   // PUT = set (overwrites)
-                conn.setRequestProperty("Content-Type", "application/json");
-                conn.setDoOutput(true);
-                conn.setConnectTimeout(10000);
-                conn.setReadTimeout(10000);
-
-                byte[] body = data.toString().getBytes(StandardCharsets.UTF_8);
-                try (OutputStream os = conn.getOutputStream()) {
-                    os.write(body);
-                }
-
-                int responseCode = conn.getResponseCode();
-                if (responseCode != 200) {
-                    Log.w(TAG, "Firebase PUT response: " + responseCode);
-                }
-                conn.disconnect();
-
+                JSONObject d = new JSONObject();
+                d.put("uid",      uid);
+                d.put("name",     userName != null ? userName : "Unknown");
+                d.put("groupId",  groupId  != null ? groupId  : "");
+                d.put("role",     userRole != null ? userRole : "pilgrim");
+                d.put("lat",      lat);
+                d.put("lng",      lng);
+                d.put("acc",      acc);
+                d.put("lastSeen", System.currentTimeMillis());
+                d.put("online",   true);   // always true — only logout sets false
+                d.put("sos",      false);
+                httpPut("/locations/" + uid + ".json", d.toString());
             } catch (Exception e) {
-                Log.e(TAG, "Firebase push failed: " + e.getMessage());
+                Log.e(TAG, "pushLocation: " + e.getMessage());
             }
         });
     }
 
-    private void pushOffline() {
-        networkExecutor.execute(() -> {
-            try {
-                JSONObject data = new JSONObject();
-                data.put("online", false);
-
-                String urlStr = FIREBASE_DB_URL + "/locations/" + uid + "/online.json";
-                if (firebaseToken != null && !firebaseToken.isEmpty()) {
-                    urlStr += "?auth=" + firebaseToken;
-                }
-
-                URL url = new URL(urlStr);
-                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                conn.setRequestMethod("PUT");
-                conn.setRequestProperty("Content-Type", "application/json");
-                conn.setDoOutput(true);
-                conn.setConnectTimeout(8000);
-                conn.setReadTimeout(8000);
-
-                try (OutputStream os = conn.getOutputStream()) {
-                    os.write("false".getBytes(StandardCharsets.UTF_8));
-                }
-                conn.disconnect();
-            } catch (Exception e) {
-                Log.e(TAG, "pushOffline failed: " + e.getMessage());
-            }
+    private void pushField(String path, String value) {
+        if (uid == null || uid.isEmpty()) return;
+        networkThread.execute(() -> {
+            try { httpPut("/locations/" + uid + "/" + path, value); }
+            catch (Exception e) { Log.e(TAG, "pushField: " + e.getMessage()); }
         });
     }
 
-    // ═══════════════════════════════════════════════════════════════
+    private void httpPut(String path, String body) throws Exception {
+        String urlStr = FIREBASE_URL + path;
+        // Append Firebase auth token if available
+        if (firebaseToken != null && !firebaseToken.isEmpty())
+            urlStr += "?auth=" + firebaseToken;
+
+        URL url = new URL(urlStr);
+        HttpURLConnection c = (HttpURLConnection) url.openConnection();
+        c.setRequestMethod("PUT");
+        c.setRequestProperty("Content-Type", "application/json");
+        c.setDoOutput(true);
+        c.setConnectTimeout(10_000);
+        c.setReadTimeout(10_000);
+        try (OutputStream os = c.getOutputStream()) {
+            os.write(body.getBytes(StandardCharsets.UTF_8));
+        }
+        int code = c.getResponseCode();
+        if (code != 200) Log.w(TAG, "Firebase HTTP " + code + " for " + path);
+        c.disconnect();
+    }
+
+    // ════════════════════════════════════════════════════════════
     // NOTIFICATION
-    // The persistent notification is REQUIRED for foreground services.
-    // It tells the user tracking is active and cannot be swiped away.
-    // Tapping it opens the app. "বন্ধ করুন" action stops the service.
-    // ═══════════════════════════════════════════════════════════════
+    // Persistent — cannot be swiped away (required for foreground service)
+    // ════════════════════════════════════════════════════════════
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel ch = new NotificationChannel(
-                    CHANNEL_ID,
-                    "Hajj Tracker — লাইভ ট্র্যাকিং",
-                    NotificationManager.IMPORTANCE_LOW  // LOW = silent, no sound
-            );
+                CHANNEL_ID, "Hajj Tracker — লাইভ ট্র্যাকিং",
+                NotificationManager.IMPORTANCE_LOW);
             ch.setDescription("আপনার লোকেশন গ্রুপের সাথে শেয়ার হচ্ছে");
             ch.setShowBadge(false);
             ch.enableVibration(false);
             ch.enableLights(false);
             ((NotificationManager) getSystemService(NOTIFICATION_SERVICE))
-                    .createNotificationChannel(ch);
+                .createNotificationChannel(ch);
         }
     }
 
     private Notification buildNotification(String text) {
-        // Tap notification → open the app
-        Intent openApp = new Intent(this, MainActivity.class);
-        openApp.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
-        PendingIntent openPi = PendingIntent.getActivity(this, 0, openApp,
-                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        Intent open = new Intent(this, MainActivity.class);
+        open.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        PendingIntent openPi = PendingIntent.getActivity(this, 0, open,
+            PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
 
-        // "বন্ধ করুন" action → stop the service
-        Intent stopIntent = new Intent(this, LocationForegroundService.class);
-        stopIntent.setAction(ACTION_STOP);
-        PendingIntent stopPi = PendingIntent.getService(this, 1, stopIntent,
-                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        Intent stop = new Intent(this, LocationForegroundService.class);
+        stop.setAction(ACTION_STOP);
+        PendingIntent stopPi = PendingIntent.getService(this, 1, stop,
+            PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
 
         return new NotificationCompat.Builder(this, CHANNEL_ID)
-                .setContentTitle("Hajj Pilgrim Tracker")
-                .setContentText(text)
-                .setSmallIcon(android.R.drawable.ic_menu_mylocation)
-                .setContentIntent(openPi)
-                .addAction(android.R.drawable.ic_menu_close_clear_cancel,
-                        "ট্র্যাকিং বন্ধ করুন", stopPi)
-                .setOngoing(true)          // cannot be swiped away
-                .setSilent(true)
-                .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-                .setPriority(NotificationCompat.PRIORITY_LOW)
-                .build();
+            .setContentTitle("Hajj Tracker — ট্র্যাকিং চালু")
+            .setContentText(text)
+            .setSmallIcon(android.R.drawable.ic_menu_mylocation)
+            .setContentIntent(openPi)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel,
+                       "লগআউট করুন", stopPi)
+            .setOngoing(true)          // cannot be swiped away
+            .setSilent(true)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build();
     }
 
     private void updateNotification(Location loc) {
-        String text = String.format(
-                "লাইভ ট্র্যাকিং চালু  •  %.5f, %.5f (±%.0fm)",
-                loc.getLatitude(), loc.getLongitude(), loc.getAccuracy());
+        String text = String.format("লাইভ · %.5f, %.5f  ±%.0fm",
+            loc.getLatitude(), loc.getLongitude(), loc.getAccuracy());
         ((NotificationManager) getSystemService(NOTIFICATION_SERVICE))
-                .notify(NOTIF_ID, buildNotification(text));
+            .notify(NOTIF_ID, buildNotification(text));
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    // Static accessor — called from JS bridge in MainActivity
-    // ═══════════════════════════════════════════════════════════════
     public static String getLastLocationJson() {
         try {
             JSONObject j = new JSONObject();
@@ -363,8 +403,6 @@ public class LocationForegroundService extends Service {
             j.put("lng", lastLng);
             j.put("acc", lastAcc);
             return j.toString();
-        } catch (Exception e) {
-            return "{}";
-        }
+        } catch (Exception e) { return "{}"; }
     }
 }
