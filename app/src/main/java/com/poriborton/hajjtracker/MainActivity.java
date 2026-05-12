@@ -282,7 +282,6 @@ public class MainActivity extends AppCompatActivity {
     // RESTORE TRACKING — if user was tracking before app was closed
     // ════════════════════════════════════════════════════════════
     private void restoreTrackingIfNeeded() {
-        if (LocationForegroundService.isRunning) return;
         SharedPreferences p = getSharedPreferences(BootReceiver.PREFS, MODE_PRIVATE);
         if (!p.getBoolean("was_tracking", false)) return;
         String uid = p.getString("uid", null);
