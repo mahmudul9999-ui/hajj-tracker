@@ -168,6 +168,31 @@ public class LocationForegroundService extends Service {
     @Nullable @Override
     public IBinder onBind(Intent i) { return null; }
 
+    // ════════════════════════════════════════════════════════════
+    // CRITICAL FIX: onTaskRemoved
+    // This is called when the user SWIPES the app away from recents.
+    // By default Android kills the service. We schedule an immediate
+    // restart via AlarmManager so tracking continues.
+    // ════════════════════════════════════════════════════════════
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        super.onTaskRemoved(rootIntent);
+        Log.d(TAG, "onTaskRemoved — user swiped app away — scheduling immediate restart");
+        // Schedule a 1-second restart via AlarmManager
+        Intent restart = new Intent(getApplicationContext(), LocationForegroundService.class);
+        restart.setAction(ACTION_RESTART);
+        PendingIntent pi = PendingIntent.getService(
+            getApplicationContext(), 88, restart,
+            PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        long triggerAt = System.currentTimeMillis() + 1000;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            alarmManager.setExactAndAllowWhileIdle(
+                AlarmManager.RTC_WAKEUP, triggerAt, pi);
+        } else {
+            alarmManager.setExact(AlarmManager.RTC_WAKEUP, triggerAt, pi);
+        }
+    }
+
     @Override
     public void onDestroy() {
         super.onDestroy();
@@ -290,10 +315,15 @@ public class LocationForegroundService extends Service {
 
     // ════════════════════════════════════════════════════════════
     // FIREBASE REST API
-    // Writes to /locations/{uid} — same path the web tracker reads
-    // Works without Firebase SDK — plain HTTP PUT
-    // FIX 2: Token is passed from website JS after login so Firebase
-    //        security rules accept the write
+    // Writes to /locations/{uid} — same path the web tracker reads.
+    //
+    // CRITICAL SAFETY FIXES:
+    //   1. Auth token retry: If write fails with 401 (token expired),
+    //      retry without token. This ensures lost pilgrims keep
+    //      reporting location even after 60+ minutes of tracking.
+    //   2. Failed pushes are logged but heartbeat keeps trying every
+    //      20 seconds. Next successful push will overwrite the data.
+    //   3. Token failure does NOT stop the service — we keep trying.
     // ════════════════════════════════════════════════════════════
     private void pushLocation(double lat, double lng, double acc) {
         if (uid == null || uid.isEmpty()) return;
@@ -310,9 +340,10 @@ public class LocationForegroundService extends Service {
                 d.put("lastSeen", System.currentTimeMillis());
                 d.put("online",   true);   // always true — only logout sets false
                 d.put("sos",      false);
-                httpPut("/locations/" + uid + ".json", d.toString());
+                httpPutWithRetry("/locations/" + uid + ".json", d.toString());
             } catch (Exception e) {
-                Log.e(TAG, "pushLocation: " + e.getMessage());
+                Log.e(TAG, "pushLocation FAILED: " + e.getMessage());
+                // Don't crash — next heartbeat will retry
             }
         });
     }
@@ -320,31 +351,62 @@ public class LocationForegroundService extends Service {
     private void pushField(String path, String value) {
         if (uid == null || uid.isEmpty()) return;
         networkThread.execute(() -> {
-            try { httpPut("/locations/" + uid + "/" + path, value); }
+            try { httpPutWithRetry("/locations/" + uid + "/" + path, value); }
             catch (Exception e) { Log.e(TAG, "pushField: " + e.getMessage()); }
         });
     }
 
-    private void httpPut(String path, String body) throws Exception {
-        String urlStr = FIREBASE_URL + path;
-        // Append Firebase auth token if available
-        if (firebaseToken != null && !firebaseToken.isEmpty())
-            urlStr += "?auth=" + firebaseToken;
+    // ════════════════════════════════════════════════════════════
+    // SAFETY-CRITICAL: httpPutWithRetry
+    //
+    // Tries the request with the auth token first. If that returns
+    // 401 (unauthorized — token expired), retries WITHOUT the token.
+    //
+    // Your Firebase rules must allow .write for /locations because
+    // the lost-pilgrim scenario means we MUST be able to write GPS
+    // even when the auth token has expired after 60 minutes.
+    //
+    // Recommended Firebase rules:
+    //   "locations": { ".read": "auth != null", ".write": true }
+    // ════════════════════════════════════════════════════════════
+    private void httpPutWithRetry(String path, String body) throws Exception {
+        int responseCode = httpPutOnce(path, body, firebaseToken);
 
+        // 401 = unauthorized (token expired or invalid)
+        // 403 = forbidden by rules
+        if (responseCode == 401 || responseCode == 403) {
+            Log.w(TAG, "Auth failed (HTTP " + responseCode + ") — retrying without token");
+            // Retry without auth token
+            responseCode = httpPutOnce(path, body, null);
+            if (responseCode != 200) {
+                Log.e(TAG, "Firebase write FAILED for lost-pilgrim safety. " +
+                           "Update Firebase rules to: .write: true for /locations");
+            }
+        }
+    }
+
+    private int httpPutOnce(String path, String body, String token) throws Exception {
+        String urlStr = FIREBASE_URL + path;
+        if (token != null && !token.isEmpty()) urlStr += "?auth=" + token;
         URL url = new URL(urlStr);
         HttpURLConnection c = (HttpURLConnection) url.openConnection();
-        c.setRequestMethod("PUT");
-        c.setRequestProperty("Content-Type", "application/json");
-        c.setDoOutput(true);
-        c.setConnectTimeout(10_000);
-        c.setReadTimeout(10_000);
-        try (OutputStream os = c.getOutputStream()) {
-            os.write(body.getBytes(StandardCharsets.UTF_8));
+        try {
+            c.setRequestMethod("PUT");
+            c.setRequestProperty("Content-Type", "application/json");
+            c.setDoOutput(true);
+            c.setConnectTimeout(10_000);
+            c.setReadTimeout(10_000);
+            try (OutputStream os = c.getOutputStream()) {
+                os.write(body.getBytes(StandardCharsets.UTF_8));
+            }
+            int code = c.getResponseCode();
+            if (code != 200) Log.w(TAG, "Firebase HTTP " + code + " for " + path);
+            return code;
+        } finally {
+            c.disconnect();
         }
-        int code = c.getResponseCode();
-        if (code != 200) Log.w(TAG, "Firebase HTTP " + code + " for " + path);
-        c.disconnect();
     }
+
 
     // ════════════════════════════════════════════════════════════
     // NOTIFICATION
