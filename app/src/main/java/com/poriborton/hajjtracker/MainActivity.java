@@ -518,6 +518,7 @@ public class MainActivity extends AppCompatActivity {
                 .show();
         }
     }
+    
 
     @Override protected void onResume()  { super.onResume();  webView.onResume();  }
     @Override protected void onPause()   { super.onPause();   webView.onPause();   }
