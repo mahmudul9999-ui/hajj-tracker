@@ -5,25 +5,26 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-    <!-- ═══ LOCATION — three levels needed ═══ -->
-    <!-- Level 1: Fine GPS accuracy -->
+    <!-- ═══ LOCATION — all three levels needed for background tracking ═══ -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
-    <!-- Level 2: Background — keeps GPS running when screen is off / app closed -->
     <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
 
     <!-- ═══ FOREGROUND SERVICE ═══ -->
-    <!-- Required to show persistent notification while tracking -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <!-- Specifies this service uses location (required Android 14+) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
 
-    <!-- ═══ SYSTEM ═══ -->
-    <!-- Prevents CPU from sleeping while service is running -->
+    <!-- ═══ BATTERY & ALARM — CRITICAL for keeping service alive ═══ -->
+    <!-- WAKE_LOCK: Keeps CPU running even when screen is off -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <!-- Restarts tracking after phone reboot -->
+    <!-- IGNORE_BATTERY_OPTIMIZATIONS: app asks user to disable battery saver -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- SCHEDULE_EXACT_ALARM: AlarmManager watchdog restart (Android 12+) -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+
+    <!-- ═══ BOOT & NOTIFICATIONS ═══ -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-    <!-- Push notifications (Android 13+) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
@@ -36,33 +37,40 @@
         android:networkSecurityConfig="@xml/network_security_config"
         android:hardwareAccelerated="true">
 
-        <!-- ── Main WebView Activity ── -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:configChanges="orientation|screenSize|keyboardHidden"
-            android:windowSoftInputMode="adjustResize">
+            android:windowSoftInputMode="adjustResize"
+            android:launchMode="singleTask">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
 
-        <!-- ── Background Location Foreground Service ── -->
-        <!-- foregroundServiceType="location" is mandatory on Android 10+ -->
+        <!-- ─── Background Location Service ─── -->
+        <!-- stopWithTask="false" means service KEEPS running when user
+             swipes the app away from recents — this is the critical
+             attribute that makes background tracking work -->
         <service
             android:name=".LocationForegroundService"
             android:exported="false"
+            android:enabled="true"
+            android:stopWithTask="false"
             android:foregroundServiceType="location" />
 
-        <!-- ── Boot Receiver: restart service after phone reboot ── -->
+        <!-- ─── Boot Receiver ─── -->
         <receiver
             android:name=".BootReceiver"
             android:exported="true"
-            android:enabled="true">
-            <intent-filter>
+            android:enabled="true"
+            android:directBootAware="false">
+            <intent-filter android:priority="999">
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
 
