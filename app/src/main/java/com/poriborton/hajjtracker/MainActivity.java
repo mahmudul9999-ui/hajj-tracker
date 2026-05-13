@@ -10,6 +10,8 @@ import android.net.NetworkInfo;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.PowerManager;
+import android.provider.Settings;
 import android.view.View;
 import android.webkit.GeolocationPermissions;
 import android.webkit.JsResult;
@@ -280,6 +282,8 @@ public class MainActivity extends AppCompatActivity {
 
     // ════════════════════════════════════════════════════════════
     // RESTORE TRACKING — if user was tracking before app was closed
+    // Uses SharedPreferences instead of static field to avoid
+    // compile-order dependency between the two classes
     // ════════════════════════════════════════════════════════════
     private void restoreTrackingIfNeeded() {
         SharedPreferences p = getSharedPreferences(BootReceiver.PREFS, MODE_PRIVATE);
@@ -306,6 +310,8 @@ public class MainActivity extends AppCompatActivity {
         } else if (!hasBackgroundLocation()) {
             requestBackgroundLocation();
         } else {
+            // All location permissions granted — also request battery whitelist
+            requestBatteryWhitelist();
             loadWebsite();
         }
         // Request notification permission (Android 13+)
@@ -388,6 +394,8 @@ public class MainActivity extends AppCompatActivity {
                     "সতর্কতা: সেটিংস > অ্যাপ > Hajj Tracker > লোকেশন > 'Allow all the time' চালু করুন।",
                     Toast.LENGTH_LONG).show();
             }
+            // After background location, ask user to disable battery optimization
+            requestBatteryWhitelist();
             loadWebsite();
         } else if (code == PERM_NOTIFICATION) {
             // Proceed regardless
@@ -443,6 +451,55 @@ public class MainActivity extends AppCompatActivity {
         Intent i = new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
         i.setData(Uri.parse("package:" + getPackageName()));
         startActivity(i);
+    }
+
+    // ════════════════════════════════════════════════════════════
+    // BATTERY OPTIMIZATION WHITELIST
+    // CRITICAL FIX: Asks the user to disable battery optimization
+    // for the app. Without this, Android will kill the background
+    // GPS service after 1-2 hours of being idle.
+    // We only ask ONCE — saved in SharedPreferences so we don't pester
+    // the user every time they open the app.
+    // ════════════════════════════════════════════════════════════
+    private void requestBatteryWhitelist() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return;
+
+        SharedPreferences p = getSharedPreferences(BootReceiver.PREFS, MODE_PRIVATE);
+        if (p.getBoolean("battery_asked", false)) return; // already asked
+
+        PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+        if (pm.isIgnoringBatteryOptimizations(getPackageName())) {
+            // Already whitelisted — save flag so we don't ask
+            p.edit().putBoolean("battery_asked", true).apply();
+            return;
+        }
+
+        new AlertDialog.Builder(this)
+            .setTitle("ব্যাটারি অপটিমাইজেশন বন্ধ করুন")
+            .setMessage("ফোন বন্ধ বা ব্যাগে থাকলেও ট্র্যাকিং চালু রাখতে:\n\n" +
+                        "পরের স্ক্রিনে 'Allow' / 'অনুমতি দিন' বেছে নিন।\n\n" +
+                        "এটি না করলে ১-২ ঘণ্টা পর ট্র্যাকিং বন্ধ হবে।")
+            .setPositiveButton("ঠিক আছে", (d, w) -> {
+                try {
+                    @SuppressLint("BatteryLife")
+                    Intent intent = new Intent(
+                        Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                    intent.setData(Uri.parse("package:" + getPackageName()));
+                    startActivity(intent);
+                } catch (Exception e) {
+                    // Fallback: open general battery settings
+                    try {
+                        Intent intent = new Intent(
+                            Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS);
+                        startActivity(intent);
+                    } catch (Exception ignored) {}
+                }
+                p.edit().putBoolean("battery_asked", true).apply();
+            })
+            .setNegativeButton("পরে", (d, w) ->
+                p.edit().putBoolean("battery_asked", true).apply())
+            .setCancelable(false)
+            .show();
     }
 
     // ════════════════════════════════════════════════════════════
