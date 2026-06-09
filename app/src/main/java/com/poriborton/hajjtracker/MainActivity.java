@@ -32,10 +32,14 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
+import com.google.firebase.messaging.FirebaseMessaging;
+
 public class MainActivity extends AppCompatActivity {
 
     // ── Your website URL ──────────────────────────────────────────
     private static final String WEBSITE_URL = "https://www.poribortonkf.com";
+    // Blood-bank deep-link target when launched from a push notification.
+    private static final String BLOOD_BANK_URL = "https://www.poribortonkf.com/blood-bank/";
     // ─────────────────────────────────────────────────────────────
 
     private static final int PERM_FINE_LOCATION = 101;
@@ -66,6 +70,30 @@ public class MainActivity extends AppCompatActivity {
         setupWebView();
         startPermissionFlow();
         restoreTrackingIfNeeded();
+        fetchFcmToken();
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        String requestId = intent.getStringExtra("request_id");
+        if (requestId != null && webView != null) {
+            webView.loadUrl(BLOOD_BANK_URL + "?request_id=" + requestId);
+        }
+    }
+
+    private void fetchFcmToken() {
+        FirebaseMessaging.getInstance().getToken()
+            .addOnCompleteListener(task -> {
+                if (!task.isSuccessful()) return;
+                String token = task.getResult();
+                if (token == null) return;
+                getSharedPreferences(PbbFirebaseMessagingService.PREFS, MODE_PRIVATE)
+                    .edit()
+                    .putString(PbbFirebaseMessagingService.KEY_TOKEN, token)
+                    .apply();
+            });
     }
 
     // ════════════════════════════════════════════════════════════
@@ -99,6 +127,8 @@ public class MainActivity extends AppCompatActivity {
 
         // JS Bridge — website calls these methods to start/stop background GPS
         webView.addJavascriptInterface(new AndroidBridge(), "Android");
+        // Separate bridge for the Blood Bank page to read the FCM token.
+        webView.addJavascriptInterface(new PbbBridge(), "PbbNative");
 
         // ── WebViewClient ──
         webView.setWebViewClient(new WebViewClient() {
@@ -281,6 +311,27 @@ public class MainActivity extends AppCompatActivity {
     }
 
     // ════════════════════════════════════════════════════════════
+    // PbbNative — JS Bridge for the Blood Bank page
+    // ════════════════════════════════════════════════════════════
+    private class PbbBridge {
+        @android.webkit.JavascriptInterface
+        public String getFcmToken() {
+            return getSharedPreferences(PbbFirebaseMessagingService.PREFS, MODE_PRIVATE)
+                .getString(PbbFirebaseMessagingService.KEY_TOKEN, "");
+        }
+        @android.webkit.JavascriptInterface
+        public boolean isNativeApp() { return true; }
+        @android.webkit.JavascriptInterface
+        public String platform() { return "android"; }
+        @android.webkit.JavascriptInterface
+        public String appVersion() {
+            try {
+                return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+            } catch (Exception e) { return ""; }
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════
     // RESTORE TRACKING — if user was tracking before app was closed
     // Uses SharedPreferences instead of static field to avoid
     // compile-order dependency between the two classes
@@ -412,8 +463,14 @@ public class MainActivity extends AppCompatActivity {
         layoutPermission.setVisibility(View.GONE);
         if (!isOnline()) { showOfflineScreen(); return; }
         webView.setVisibility(View.VISIBLE);
-        // FIX 1: Always load fresh URL — no browser cache
-        webView.loadUrl(WEBSITE_URL + "?v=" + System.currentTimeMillis());
+        // If launched from a blood-bank push notification, jump to that chat.
+        String requestId = getIntent() != null ? getIntent().getStringExtra("request_id") : null;
+        if (requestId != null && !requestId.isEmpty()) {
+            webView.loadUrl(BLOOD_BANK_URL + "?request_id=" + requestId);
+        } else {
+            // FIX 1: Always load fresh URL — no browser cache
+            webView.loadUrl(WEBSITE_URL + "?v=" + System.currentTimeMillis());
+        }
     }
 
     private void retryLoad() {
