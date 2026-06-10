@@ -1,45 +1,66 @@
 {
   "project_info": {
-    "project_number": "000000000000",
+    "project_number": "997885752749",
+    "firebase_url": "https://pilgrim-tracker-ee93d-default-rtdb.asia-southeast1.firebasedatabase.app",
     "project_id": "pilgrim-tracker-ee93d",
-    "storage_bucket": "pilgrim-tracker-ee93d.appspot.com"
+    "storage_bucket": "pilgrim-tracker-ee93d.firebasestorage.app"
   },
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:000000000000:android:0000000000000000000000",
+        "mobilesdk_app_id": "1:997885752749:android:eb2678aedb0cf41c38dd24",
         "android_client_info": {
-          "package_name": "com.poriborton.hajjtracker"
+          "package_name": "com.poriborton.bloodbank"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "997885752749-pqaqdlomn8o8abcidj9shvhfkcl9nbh3.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
-          "current_key": "PLACEHOLDER_REPLACE_WITH_REAL_GOOGLE_SERVICES_JSON_FROM_FIREBASE"
+          "current_key": "AIzaSyBurIHjmQJ3IlVCVFc9w38__HFGi-mLJ5I"
         }
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "997885752749-pqaqdlomn8o8abcidj9shvhfkcl9nbh3.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
         }
       }
     },
     {
       "client_info": {
-        "mobilesdk_app_id": "1:000000000000:android:1111111111111111111111",
+        "mobilesdk_app_id": "1:997885752749:android:8fca46c272923d9538dd24",
         "android_client_info": {
-          "package_name": "com.poriborton.hajjtracker.debug"
+          "package_name": "com.poriborton.hajjtracker"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "997885752749-pqaqdlomn8o8abcidj9shvhfkcl9nbh3.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
-          "current_key": "PLACEHOLDER_REPLACE_WITH_REAL_GOOGLE_SERVICES_JSON_FROM_FIREBASE"
+          "current_key": "AIzaSyBurIHjmQJ3IlVCVFc9w38__HFGi-mLJ5I"
         }
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "997885752749-pqaqdlomn8o8abcidj9shvhfkcl9nbh3.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
         }
       }
     }
